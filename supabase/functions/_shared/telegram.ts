@@ -63,22 +63,43 @@ export async function hmacSha256(
   return crypto.subtle.sign("HMAC", key, encoder.encode(message));
 }
 
-export function buildDataCheckString(entries: Iterable<[string, string]>): string {
+export function buildDataCheckString(
+  entries: Iterable<[string, string]>,
+  keepSignature = false,
+): string {
   return Array.from(entries)
-    .filter(([key]) => key !== "hash" && key !== "signature")
+    .filter(([key]) => key !== "hash" && (keepSignature || key !== "signature"))
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, value]) => `${key}=${value}`)
     .join("\n");
 }
 
-export async function signInitData(initData: string, botToken: string): Promise<string> {
+export async function signInitData(
+  initData: string,
+  botToken: string,
+  keepSignature = false,
+): Promise<string> {
   const params = new URLSearchParams(initData);
   params.delete("hash");
-  params.delete("signature");
-  const dataCheckString = buildDataCheckString(params.entries());
+  if (!keepSignature) params.delete("signature");
+  const dataCheckString = buildDataCheckString(params.entries(), keepSignature);
   const secret = await hmacSha256(encoder.encode("WebAppData"), botToken);
   const signature = await hmacSha256(secret, dataCheckString);
   return toHex(signature);
+}
+
+/**
+ * Telegram clients disagree on one detail: some fold the Ed25519 `signature`
+ * field into the data-check-string, others omit it. Both are valid HMACs over
+ * the bot token, so accept either form.
+ */
+export async function candidateSignatures(
+  initData: string,
+  botToken: string,
+): Promise<string[]> {
+  const withOut = await signInitData(initData, botToken, false);
+  const withSignature = await signInitData(initData, botToken, true);
+  return withOut === withSignature ? [withOut] : [withOut, withSignature];
 }
 
 export interface VerifyOptions {
@@ -126,8 +147,9 @@ export async function verifyInitData(
     throw new TelegramAuthError("invalid_init_data", "This session timestamp is in the future.");
   }
 
-  const expected = await signInitData(rawInitData, botToken);
-  if (!constantTimeEqual(expected, hash.toLowerCase())) {
+  const expected = await candidateSignatures(rawInitData, botToken);
+  const received = hash.toLowerCase();
+  if (!expected.some((candidate) => constantTimeEqual(candidate, received))) {
     throw new TelegramAuthError(
       "invalid_init_data",
       "We couldn't verify this Telegram session. Reopen the app from the bot.",

@@ -8,10 +8,14 @@ const BOT_TOKEN = "123456789:AAFakeTokenFor_Tests_only-1234567890";
 
 const encoder = new TextEncoder();
 
-async function sign(initData: string, botToken: string): Promise<string> {
+async function sign(
+  initData: string,
+  botToken: string,
+  includeSignature = false,
+): Promise<string> {
   const params = new URLSearchParams(initData);
   params.delete("hash");
-  params.delete("signature");
+  if (!includeSignature) params.delete("signature");
   const checkString = [...params.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, value]) => `${key}=${value}`)
@@ -65,6 +69,19 @@ describe("verifyInitData", () => {
   it("ignores the optional signature field when checking the hash", async () => {
     const initData = `${await makeInitData()}&signature=ed25519-not-used-here`;
     await expect(verifyInitData(initData, BOT_TOKEN)).resolves.toBeTruthy();
+  });
+
+  it("accepts a session whose hash folds in the signature field", async () => {
+    const params = new URLSearchParams({
+      query_id: "AAHpqTpJAwAAAOmpOkkPOgUs",
+      user: JSON.stringify({ id: 42, first_name: "Ada", username: "ada" }),
+      auth_date: String(Math.floor(Date.now() / 1000)),
+      signature: "Dc8H44AgR750d1cNIJ4U9tpeQPb-p6g7Q1ImmmloaY3jkI_dPAxW1uvEhWFWp7lXnHN1AG",
+    });
+    const hash = await sign(params.toString(), BOT_TOKEN, true);
+    params.set("hash", hash);
+    const result = await verifyInitData(params.toString(), BOT_TOKEN);
+    expect(result.user.id).toBe(42);
   });
 
   it("rejects tampered user data", async () => {

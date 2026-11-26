@@ -1,6 +1,5 @@
 // Taskon API - single-file bundle for Supabase Dashboard deployment.
 // Generated from supabase/functions/api + _shared. Name the function: api
-import { createClient } from "npm:@supabase/supabase-js@2";
 // supabase/functions/_shared/telegram.ts
 var TelegramAuthError = class extends Error {
   code;
@@ -32,17 +31,22 @@ async function hmacSha256(keyBytes, message) {
   );
   return crypto.subtle.sign("HMAC", key, encoder.encode(message));
 }
-function buildDataCheckString(entries) {
-  return Array.from(entries).filter(([key]) => key !== "hash" && key !== "signature").sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, value]) => `${key}=${value}`).join("\n");
+function buildDataCheckString(entries, keepSignature = false) {
+  return Array.from(entries).filter(([key]) => key !== "hash" && (keepSignature || key !== "signature")).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, value]) => `${key}=${value}`).join("\n");
 }
-async function signInitData(initData, botToken) {
+async function signInitData(initData, botToken, keepSignature = false) {
   const params = new URLSearchParams(initData);
   params.delete("hash");
-  params.delete("signature");
-  const dataCheckString = buildDataCheckString(params.entries());
+  if (!keepSignature) params.delete("signature");
+  const dataCheckString = buildDataCheckString(params.entries(), keepSignature);
   const secret = await hmacSha256(encoder.encode("WebAppData"), botToken);
   const signature = await hmacSha256(secret, dataCheckString);
   return toHex(signature);
+}
+async function candidateSignatures(initData, botToken) {
+  const withOut = await signInitData(initData, botToken, false);
+  const withSignature = await signInitData(initData, botToken, true);
+  return withOut === withSignature ? [withOut] : [withOut, withSignature];
 }
 async function verifyInitData(rawInitData, botToken, options = {}) {
   if (!rawInitData) {
@@ -75,8 +79,9 @@ async function verifyInitData(rawInitData, botToken, options = {}) {
   if (authDate - nowSeconds > 120) {
     throw new TelegramAuthError("invalid_init_data", "This session timestamp is in the future.");
   }
-  const expected = await signInitData(rawInitData, botToken);
-  if (!constantTimeEqual(expected, hash.toLowerCase())) {
+  const expected = await candidateSignatures(rawInitData, botToken);
+  const received = hash.toLowerCase();
+  if (!expected.some((candidate) => constantTimeEqual(candidate, received))) {
     throw new TelegramAuthError(
       "invalid_init_data",
       "We couldn't verify this Telegram session. Reopen the app from the bot."
@@ -468,6 +473,7 @@ async function handleAdmin(db, ctx, action, payload) {
 }
 
 // supabase/functions/_shared/db.ts
+import { createClient } from "npm:@supabase/supabase-js@2";
 function getServiceClient() {
   const url = Deno.env.get("SUPABASE_URL");
   const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
