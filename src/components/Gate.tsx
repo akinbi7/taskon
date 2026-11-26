@@ -1,6 +1,6 @@
 import { Wordmark } from "../components/Icons";
 import { errorMessage, errorCode } from "../lib/errors";
-import { getInitData } from "../lib/telegram";
+import { getInitData, copyText } from "../lib/telegram";
 
 export function LoadingScreen({ label = "Counting the points…" }: { label?: string }) {
   return (
@@ -70,6 +70,15 @@ export function Gate({
         <br />
         fields: {initDataParams ? [...initDataParams.keys()].join(",") || "none" : "parse_failed"}
       </p>
+      {raw ? (
+        <button
+          type="button"
+          className="gate__copy"
+          onClick={() => void copyText(raw)}
+        >
+          Copy session data
+        </button>
+      ) : null}
     </div>
   );
 }

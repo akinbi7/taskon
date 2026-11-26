@@ -896,6 +896,21 @@
   word-break: break-word;
 }
 
+.gate__copy {
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
 .demo-badge {
   position: fixed;
   top: calc(var(--safe-top) + 9px);
