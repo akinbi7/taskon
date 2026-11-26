@@ -1,0 +1,22 @@
+# Render Blueprint for the Taskon bot (webhook mode, free plan).
+# New + Blueprint -> pick this repo -> paste BOT_TOKEN when prompted.
+services:
+  - type: web
+    name: taskon-bot
+    runtime: python
+    plan: free
+    region: frankfurt
+    rootDir: bot
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.6
+      - key: WEBAPP_URL
+        value: https://taskon-three.vercel.app
+      - key: BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true

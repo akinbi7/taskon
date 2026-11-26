@@ -27,10 +27,34 @@ from aiogram.types import (
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-PUBLIC_URL = os.environ.get("PUBLIC_URL", "").strip().rstrip("/")
 WEBAPP_URL = os.environ.get("WEBAPP_URL", "").strip().rstrip("/")
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
 PORT = int(os.environ.get("PORT", "8080"))
+
+
+def resolve_public_url() -> str:
+    """This service's own https URL.
+
+    Free hosts only tell you the URL after the first deploy, so fall back to the
+    URL they inject into the environment instead of asking for PUBLIC_URL.
+    """
+    for name in ("PUBLIC_URL", "RENDER_EXTERNAL_URL"):
+        value = os.environ.get(name, "").strip().rstrip("/")
+        if value:
+            return value
+
+    railway = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip().rstrip("/")
+    if railway:
+        return railway if railway.startswith("https://") else f"https://{railway}"
+
+    fly = os.environ.get("FLY_APP_NAME", "").strip()
+    if fly:
+        return f"https://{fly}.fly.dev"
+
+    return ""
+
+
+PUBLIC_URL = resolve_public_url()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("taskon-bot")
@@ -117,6 +141,26 @@ async def on_startup(app: web.Application) -> None:
             BotCommand(command="help", description="How points and tasks work"),
         ]
     )
+
+    # Shown before the first /start, so a new chat isn't a blank page.
+    try:
+        await bot.set_my_short_description(
+            short_description=(
+                "Check in daily, finish small tasks, invite friends. "
+                "Points only - no token, nothing to cash out."
+            )
+        )
+        await bot.set_my_description(
+            description=(
+                "Taskon is a small task-and-points club inside Telegram.\n\n"
+                "Check in once a day, finish a few tasks, invite a friend with your "
+                "link. Points are only a score inside the app: there is no token "
+                "and nothing to buy, sell or withdraw."
+            )
+        )
+    except Exception as exc:  # profile text is cosmetic; never block the webhook
+        log.warning("Could not update bot descriptions: %s", exc)
+
     log.info("Webhook set to %s", webhook_url)
 
 

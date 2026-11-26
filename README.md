@@ -149,15 +149,25 @@ database.
    - **Build:** `pip install -r requirements.txt`
    - **Start:** `python bot.py`
    - **Health check:** `/healthz`
+
+   Render can read `render.yaml` from the repo root: **New → Blueprint**, pick
+   the repo, and it creates the service with the root directory, Python version,
+   health check and `WEBAPP_URL` already set. Paste `BOT_TOKEN` when prompted.
 4. Set the environment:
 
 ```bash
 BOT_TOKEN=123456:...
-PUBLIC_URL=https://your-bot.onrender.com
 WEBAPP_URL=https://your-app.vercel.app
 WEBHOOK_SECRET=optional-long-random-string
 PORT=8080
+# Optional. Render and Railway are detected automatically, so you only need
+# this on a host that does not inject its own public URL.
+PUBLIC_URL=https://your-bot.onrender.com
 ```
+
+`PUBLIC_URL` is resolved from `PUBLIC_URL`, then `RENDER_EXTERNAL_URL`, then
+`RAILWAY_PUBLIC_DOMAIN`, then `FLY_APP_NAME` — that avoids the chicken-and-egg
+of needing the URL before the first deploy.
 
 On startup the bot sets its own webhook to `${PUBLIC_URL}/webhook`
 (`/webhook/<secret>` is not used; the secret is sent in Telegram's
