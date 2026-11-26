@@ -25,7 +25,17 @@ export function Gate({
   const code = errorCode(error);
   const isAuth = ["missing_init_data", "invalid_init_data", "init_data_expired"].includes(code);
   // Temporary diagnostic: shows which check rejected the session.
-  const initDataLength = getInitData().length;
+  const raw = getInitData();
+  const initDataParams = (() => {
+    try {
+      return new URLSearchParams(raw);
+    } catch {
+      return null;
+    }
+  })();
+  const authDate = Number(initDataParams?.get("auth_date") ?? NaN);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const skew = Number.isFinite(authDate) ? nowSeconds - authDate : null;
 
   return (
     <div className="gate">
@@ -51,7 +61,12 @@ export function Gate({
       ) : null}
       <p className="gate__fine">Points only. Nothing here is money.</p>
       <p className="gate__diag">
-        {code || "no_code"} · initData {initDataLength ? `${initDataLength} chars` : "empty"}
+        {code || "no_code"} · initData {raw.length ? `${raw.length} chars` : "empty"}
+        <br />
+        {errorMessage(error)}
+        <br />
+        auth_date {Number.isFinite(authDate) ? authDate : "none"} · now {nowSeconds} · Δ{" "}
+        {skew === null ? "n/a" : `${skew}s`}
       </p>
     </div>
   );
