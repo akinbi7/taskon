@@ -233,7 +233,9 @@ See `.env.example` and `bot/.env.example`.
 
 - **Signed sessions.** `initData` is verified with the bot token; the hash is
   checked in constant time and `auth_date` must be under 24 hours old. Client
-  user IDs and points are never accepted.
+  user IDs and points are never accepted. Telegram clients disagree on whether
+  the Ed25519 `signature` field belongs in the data-check-string, so the hash is
+  accepted in either form — both are HMACs over the bot token.
 - **Server-only balances.** RLS is forced on every table and `anon` /
   `authenticated` have no table or function access. The Edge Function uses the
   service role. `point_ledger` records every change.
