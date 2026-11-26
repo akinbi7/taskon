@@ -1,0 +1,6 @@
+# https://supabase.com/docs/guides/cli/config
+project_id = "taskon"
+
+# The Mini App authenticates with Telegram initData, not a Supabase JWT.
+[functions.api]
+verify_jwt = false

@@ -1,0 +1,72 @@
+@font-face {
+  font-family: "Archivo";
+  src: url("/fonts/archivo-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Fraunces";
+  src: url("/fonts/fraunces-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  font-optical-sizing: auto;
+}
+
+@font-face {
+  font-family: "Fraunces";
+  src: url("/fonts/fraunces-italic-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+  font-optical-sizing: auto;
+}
+
+:root {
+  color-scheme: light;
+  --paper: #f3ecdf;
+  --paper-raised: #faf4e9;
+  --paper-sink: #e9dfcd;
+  --ink: #241f19;
+  --ink-soft: #5c5041;
+  --muted: #8b7d6a;
+  --line: #d8cab5;
+  --line-strong: #b5a287;
+  --accent: #b04a26;
+  --accent-deep: #8a3216;
+  --accent-wash: #eed6c3;
+  --olive: #4d593b;
+  --olive-wash: #e2e3d0;
+  --danger: #8e2f1d;
+  --danger-wash: #f0d7cc;
+  --shadow-hard: 2px 2px 0 rgba(176, 74, 38, 0.9);
+  --paper-grain-opacity: 0.05;
+  --font-display: "Fraunces", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --font-body: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --tab-height: 62px;
+  --safe-bottom: max(env(safe-area-inset-bottom, 0px), var(--tg-safe-bottom, 0px));
+  --safe-top: max(env(safe-area-inset-top, 0px), var(--tg-safe-top, 0px));
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #1b1713;
+  --paper-raised: #241f19;
+  --paper-sink: #15120f;
+  --ink: #f0e6d6;
+  --ink-soft: #c8bca8;
+  --muted: #978975;
+  --line: #3a3128;
+  --line-strong: #5b4d3e;
+  --accent: #e07a52;
+  --accent-deep: #f0966f;
+  --accent-wash: #3a271e;
+  --olive: #aeb88f;
+  --olive-wash: #2a3022;
+  --danger: #e08e75;
+  --danger-wash: #3b221b;
+  --shadow-hard: 2px 2px 0 rgba(224, 122, 82, 0.75);
+  --paper-grain-opacity: 0.08;
+}

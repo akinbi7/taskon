@@ -1,0 +1,860 @@
+// Taskon API - single-file bundle for Supabase Dashboard deployment.
+// Generated from supabase/functions/api + _shared. Name the function: api
+import { createClient } from "npm:@supabase/supabase-js@2";
+// supabase/functions/_shared/telegram.ts
+var TelegramAuthError = class extends Error {
+  code;
+  constructor(code, message) {
+    super(message);
+    this.name = "TelegramAuthError";
+    this.code = code;
+  }
+};
+var encoder = new TextEncoder();
+function toHex(buffer) {
+  return Array.from(new Uint8Array(buffer)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+function constantTimeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+async function hmacSha256(keyBytes, message) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    keyBytes,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  return crypto.subtle.sign("HMAC", key, encoder.encode(message));
+}
+function buildDataCheckString(entries) {
+  return Array.from(entries).filter(([key]) => key !== "hash" && key !== "signature").sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, value]) => `${key}=${value}`).join("\n");
+}
+async function signInitData(initData, botToken) {
+  const params = new URLSearchParams(initData);
+  params.delete("hash");
+  params.delete("signature");
+  const dataCheckString = buildDataCheckString(params.entries());
+  const secret = await hmacSha256(encoder.encode("WebAppData"), botToken);
+  const signature = await hmacSha256(secret, dataCheckString);
+  return toHex(signature);
+}
+async function verifyInitData(rawInitData, botToken, options = {}) {
+  if (!rawInitData) {
+    throw new TelegramAuthError(
+      "missing_init_data",
+      "Open Taskon from inside Telegram so we can verify you."
+    );
+  }
+  const nowSeconds = Math.floor((options.now ?? Date.now()) / 1e3);
+  const maxAge = options.maxAgeSeconds ?? 60 * 60 * 24;
+  if (!botToken) {
+    throw new TelegramAuthError("server_misconfigured", "Bot token is missing on the server.");
+  }
+  const params = new URLSearchParams(rawInitData);
+  const hash = params.get("hash");
+  if (!hash) {
+    throw new TelegramAuthError("invalid_init_data", "This session is missing its signature.");
+  }
+  const authDateRaw = params.get("auth_date");
+  const authDate = Number(authDateRaw);
+  if (!authDateRaw || !Number.isFinite(authDate)) {
+    throw new TelegramAuthError("invalid_init_data", "This session has no timestamp.");
+  }
+  if (nowSeconds - authDate > maxAge) {
+    throw new TelegramAuthError(
+      "init_data_expired",
+      "This session is old. Close Taskon and open it again."
+    );
+  }
+  if (authDate - nowSeconds > 120) {
+    throw new TelegramAuthError("invalid_init_data", "This session timestamp is in the future.");
+  }
+  const expected = await signInitData(rawInitData, botToken);
+  if (!constantTimeEqual(expected, hash.toLowerCase())) {
+    throw new TelegramAuthError(
+      "invalid_init_data",
+      "We couldn't verify this Telegram session. Reopen the app from the bot."
+    );
+  }
+  let user;
+  try {
+    user = JSON.parse(params.get("user") ?? "");
+  } catch {
+    throw new TelegramAuthError("invalid_init_data", "This session has no user.");
+  }
+  if (!user || !Number.isSafeInteger(user.id) || user.id <= 0) {
+    throw new TelegramAuthError("invalid_init_data", "This session has an invalid user.");
+  }
+  return {
+    user,
+    startParam: params.get("start_param"),
+    authDate
+  };
+}
+function parseReferralStartParam(startParam) {
+  if (!startParam) return null;
+  const match = /^ref_(\d{1,20})$/.exec(startParam);
+  if (!match) return null;
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+// supabase/functions/_shared/errors.ts
+var ApiError = class extends Error {
+  code;
+  status;
+  constructor(code, message, status = 400) {
+    super(message);
+    this.name = "ApiError";
+    this.code = code;
+    this.status = status;
+  }
+};
+var MESSAGES = {
+  missing_init_data: "Open Taskon from inside Telegram so we can verify you.",
+  invalid_init_data: "We couldn't verify this Telegram session. Reopen the app from the bot.",
+  init_data_expired: "This session is old. Close Taskon and open it again.",
+  server_misconfigured: "The server is missing its bot token. Tell the admin.",
+  user_not_found: "We couldn't find that account.",
+  user_banned: "This account can't earn points right now.",
+  already_checked_in: "You already checked in today. The next one opens after midnight UTC.",
+  task_unavailable: "This task isn't open anymore.",
+  task_already_completed: "You already collected this one.",
+  task_not_started: "Open the task first, then come back to claim it.",
+  too_soon: "Not yet \u2014 the clock is still running on this one.",
+  membership_not_found: "You're not in that channel yet. Join it, then check again.",
+  verification_failed: "We can't check that channel right now. The bot may need to be added to it.",
+  not_admin: "This door only opens for admins.",
+  slow_down: "That was quick. Give it a minute, then try again.",
+  invalid_title: "Give the task a title between 3 and 120 characters.",
+  invalid_type: "That task type isn't one we support.",
+  invalid_reward: "The reward has to be between 1 and 10,000 points.",
+  invalid_url: "That link doesn't look right. Use a full https:// address.",
+  invalid_timer: "The timer has to be between 5 and 900 seconds.",
+  invalid_delta: "Enter a point change that isn't zero.",
+  reason_required: "Add a short reason before saving.",
+  task_not_found: "That task doesn't exist anymore.",
+  cannot_ban_self: "You can't ban your own account.",
+  bad_request: "Something in that request was missing.",
+  internal_error: "Something went wrong on our side. Try again in a moment."
+};
+function fromDbError(error) {
+  const raw = typeof error === "object" && error !== null && "message" in error ? String(error.message) : String(error ?? "");
+  const known = Object.keys(MESSAGES).find((code) => raw.includes(code));
+  if (known) {
+    const status = known === "user_banned" || known === "membership_not_found" ? 403 : known === "task_unavailable" ? 410 : known === "internal_error" ? 500 : known === "user_not_found" || known === "task_not_found" ? 404 : 400;
+    return new ApiError(known, MESSAGES[known], status);
+  }
+  if (raw.toLowerCase().includes("rate limit")) {
+    return new ApiError("slow_down", MESSAGES.slow_down, 429);
+  }
+  console.error("Unmapped database error:", raw);
+  return new ApiError("internal_error", MESSAGES.internal_error, 500);
+}
+
+// supabase/functions/_shared/auth.ts
+function adminIds() {
+  return new Set(
+    (Deno.env.get("ADMIN_IDS") ?? "").split(",").map((id) => Number(id.trim())).filter((id) => Number.isSafeInteger(id) && id > 0)
+  );
+}
+async function authenticate(req, db, bodyInitData) {
+  const headerInitData = req.headers.get("x-telegram-init-data");
+  const initData = typeof bodyInitData === "string" && bodyInitData.length > 0 ? bodyInitData : headerInitData ?? "";
+  let verified;
+  try {
+    verified = await verifyInitData(initData, Deno.env.get("BOT_TOKEN") ?? "");
+  } catch (error2) {
+    if (error2 instanceof TelegramAuthError) {
+      throw new ApiError(error2.code, error2.message, 401);
+    }
+    throw error2;
+  }
+  const telegramId = Number(verified.user.id);
+  const { data, error } = await db.from("users").upsert(
+    {
+      telegram_id: telegramId,
+      username: verified.user.username ?? null,
+      first_name: verified.user.first_name ?? null,
+      last_seen_at: (/* @__PURE__ */ new Date()).toISOString()
+    },
+    { onConflict: "telegram_id" }
+  ).select("*").single();
+  if (error || !data) {
+    throw fromDbError(error ?? "user_not_found");
+  }
+  let user = data;
+  let referralBonus = 0;
+  const referrerTelegramId = parseReferralStartParam(verified.startParam);
+  if (referrerTelegramId && referrerTelegramId !== telegramId && !user.referrer_id && !user.banned) {
+    const { data: bonus, error: referralError } = await db.rpc("attach_referral", {
+      p_user_id: user.id,
+      p_referrer_telegram_id: referrerTelegramId
+    });
+    if (referralError) {
+      console.error("attach_referral failed:", referralError.message);
+    } else if (typeof bonus === "number" && bonus > 0) {
+      referralBonus = bonus;
+      const { data: fresh } = await db.from("users").select("*").eq("id", user.id).single();
+      if (fresh) user = fresh;
+    }
+  }
+  if (user.banned) {
+    throw new ApiError("user_banned", MESSAGES.user_banned, 403);
+  }
+  const admins = adminIds();
+  return {
+    user,
+    telegramUser: verified.user,
+    isAdmin: admins.has(telegramId),
+    referralBonus,
+    adminIds: admins
+  };
+}
+async function enforceRateLimit(db, userId, action, limit, windowSeconds) {
+  const { data, error } = await db.rpc("check_rate_limit", {
+    p_user_id: userId,
+    p_action: action,
+    p_limit: limit,
+    p_window_seconds: windowSeconds
+  });
+  if (error) throw fromDbError(error);
+  if (data !== true) {
+    throw new ApiError("slow_down", MESSAGES.slow_down, 429);
+  }
+}
+
+// supabase/functions/_shared/http.ts
+var BASE_HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "cache-control": "no-store"
+};
+function corsHeaders(req) {
+  const configured = (Deno.env.get("ALLOWED_ORIGINS") ?? "").split(",").map((origin2) => origin2.trim()).filter(Boolean);
+  const origin = req.headers.get("origin") ?? "";
+  const allowOrigin = configured.length === 0 ? "*" : configured.includes(origin) ? origin : "null";
+  return {
+    "access-control-allow-origin": allowOrigin,
+    "access-control-allow-methods": "POST, OPTIONS",
+    "access-control-allow-headers": "content-type, x-telegram-init-data",
+    "access-control-max-age": "86400",
+    vary: "origin"
+  };
+}
+function json(req, body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...BASE_HEADERS, ...corsHeaders(req) }
+  });
+}
+function preflight(req) {
+  return new Response(null, { status: 204, headers: corsHeaders(req) });
+}
+function isUuid(value) {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+// supabase/functions/_shared/admin.ts
+function asString(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function asInteger(value) {
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+function asBoolean(value) {
+  return typeof value === "boolean" ? value : null;
+}
+function assertTaskInput(payload) {
+  const title = asString(payload.title);
+  const type = asString(payload.type);
+  const url = asString(payload.url);
+  const reward = asInteger(payload.reward);
+  const timerSeconds = asInteger(payload.timerSeconds ?? 20);
+  if (title.length < 3 || title.length > 120) {
+    throw new ApiError("invalid_title", MESSAGES.invalid_title, 400);
+  }
+  if (!["join_channel", "visit_link", "follow_x", "partner"].includes(type)) {
+    throw new ApiError("invalid_type", MESSAGES.invalid_type, 400);
+  }
+  if (reward === null || reward < 1 || reward > 1e4) {
+    throw new ApiError("invalid_reward", MESSAGES.invalid_reward, 400);
+  }
+  const validUrl = type === "join_channel" ? /^@[A-Za-z0-9_]{4,32}$/.test(url) || /^https:\/\/t\.me\/[A-Za-z0-9_]{4,32}\/?$/.test(url) : /^https?:\/\//.test(url);
+  if (!validUrl) {
+    throw new ApiError("invalid_url", MESSAGES.invalid_url, 400);
+  }
+  if (timerSeconds === null || timerSeconds < 5 || timerSeconds > 900) {
+    throw new ApiError("invalid_timer", MESSAGES.invalid_timer, 400);
+  }
+  let expiresAt = null;
+  if (payload.expiresAt) {
+    const parsed = new Date(String(payload.expiresAt));
+    if (Number.isNaN(parsed.getTime())) {
+      throw new ApiError("bad_request", "That expiry date isn't valid.", 400);
+    }
+    expiresAt = parsed.toISOString();
+  }
+  return { title, type, url, reward, timerSeconds, expiresAt };
+}
+async function handleAdmin(db, ctx, action, payload) {
+  if (!ctx.isAdmin) {
+    throw new ApiError("not_admin", MESSAGES.not_admin, 403);
+  }
+  await enforceRateLimit(db, ctx.user.id, "admin", 180, 60);
+  const adminId = Number(ctx.user.telegram_id);
+  switch (action) {
+    case "admin.overview": {
+      const { data, error } = await db.rpc("admin_stats");
+      if (error) throw fromDbError(error);
+      return data;
+    }
+    case "admin.tasks.list": {
+      const { data, error } = await db.from("tasks").select("id,title,type,reward,url,active,timer_seconds,expires_at,created_at,user_tasks(count)").order("created_at", { ascending: false });
+      if (error) throw fromDbError(error);
+      return (data ?? []).map((row) => {
+        const relation = row.user_tasks;
+        return {
+          id: row.id,
+          title: row.title,
+          type: row.type,
+          reward: row.reward,
+          url: row.url,
+          active: row.active,
+          timerSeconds: row.timer_seconds,
+          expiresAt: row.expires_at,
+          createdAt: row.created_at,
+          completions: relation?.[0]?.count ?? 0
+        };
+      });
+    }
+    case "admin.tasks.save": {
+      const input = assertTaskInput(payload);
+      const taskId = payload.id ?? null;
+      if (taskId !== null && !isUuid(taskId)) {
+        throw new ApiError("task_not_found", MESSAGES.task_not_found, 404);
+      }
+      const { data, error } = await db.rpc("admin_task_upsert", {
+        p_admin_telegram_id: adminId,
+        p_task_id: taskId,
+        p_title: input.title,
+        p_type: input.type,
+        p_reward: input.reward,
+        p_url: input.url,
+        p_timer_seconds: input.type === "join_channel" ? 20 : input.timerSeconds,
+        p_expires_at: input.expiresAt
+      });
+      if (error) throw fromDbError(error);
+      return { id: data };
+    }
+    case "admin.tasks.toggle": {
+      if (!isUuid(payload.id)) throw new ApiError("task_not_found", MESSAGES.task_not_found, 404);
+      const active = asBoolean(payload.active);
+      if (active === null) throw new ApiError("bad_request", MESSAGES.bad_request, 400);
+      const { error } = await db.rpc("admin_task_toggle", {
+        p_admin_telegram_id: adminId,
+        p_task_id: payload.id,
+        p_active: active
+      });
+      if (error) throw fromDbError(error);
+      return { id: payload.id, active };
+    }
+    case "admin.tasks.delete": {
+      if (!isUuid(payload.id)) throw new ApiError("task_not_found", MESSAGES.task_not_found, 404);
+      const { error } = await db.rpc("admin_task_delete", {
+        p_admin_telegram_id: adminId,
+        p_task_id: payload.id
+      });
+      if (error) throw fromDbError(error);
+      return { id: payload.id };
+    }
+    case "admin.users.search": {
+      const query = asString(payload.query).replace(/^@+/, "");
+      const { data, error } = await db.rpc("admin_search_users", {
+        p_query: query,
+        p_limit: 25
+      });
+      if (error) throw fromDbError(error);
+      return (data ?? []).map((row) => ({
+        id: row.user_id,
+        telegramId: row.telegram_id,
+        username: row.username,
+        firstName: row.first_name,
+        points: row.points,
+        streak: row.streak,
+        banned: row.banned,
+        banReason: row.ban_reason,
+        referrals: row.referrals,
+        referralEarnings: row.referral_earnings,
+        tasksDone: row.tasks_done,
+        lastSeenAt: row.last_seen_at,
+        createdAt: row.created_at
+      }));
+    }
+    case "admin.users.adjust": {
+      if (!isUuid(payload.userId)) throw new ApiError("user_not_found", MESSAGES.user_not_found, 404);
+      const delta = asInteger(payload.delta);
+      const reason = asString(payload.reason);
+      if (delta === null || delta === 0 || Math.abs(delta) > 1e5) {
+        throw new ApiError("invalid_delta", MESSAGES.invalid_delta, 400);
+      }
+      if (reason.length < 3) {
+        throw new ApiError("reason_required", MESSAGES.reason_required, 400);
+      }
+      const { data, error } = await db.rpc("admin_adjust_points", {
+        p_admin_telegram_id: adminId,
+        p_user_id: payload.userId,
+        p_delta: delta,
+        p_reason: reason
+      });
+      if (error) throw fromDbError(error);
+      return { points: data };
+    }
+    case "admin.users.ban": {
+      if (!isUuid(payload.userId)) throw new ApiError("user_not_found", MESSAGES.user_not_found, 404);
+      const banned = asBoolean(payload.banned);
+      if (banned === null) throw new ApiError("bad_request", MESSAGES.bad_request, 400);
+      const reason = asString(payload.reason);
+      if (banned && reason.length < 3) {
+        throw new ApiError("reason_required", "Add a short reason for the ban.", 400);
+      }
+      const { error } = await db.rpc("admin_set_ban", {
+        p_admin_telegram_id: adminId,
+        p_user_id: payload.userId,
+        p_banned: banned,
+        p_reason: reason || null
+      });
+      if (error) throw fromDbError(error);
+      return { id: payload.userId, banned };
+    }
+    case "admin.flags": {
+      const { data, error } = await db.rpc("admin_flags", { p_limit: 100 });
+      if (error) throw fromDbError(error);
+      return (data ?? []).map((row) => ({
+        userId: row.user_id,
+        telegramId: row.telegram_id,
+        username: row.username,
+        firstName: row.first_name,
+        flags: row.flags,
+        refs24h: row.refs_24h,
+        refs1h: row.refs_1h,
+        sameSecondClaims: row.same_second_claims,
+        points: row.points,
+        lastSeenAt: row.last_seen_at
+      }));
+    }
+    case "admin.audit": {
+      const { data, error } = await db.rpc("admin_audit", { p_limit: 200 });
+      if (error) throw fromDbError(error);
+      return (data ?? []).map((row) => ({
+        id: row.id,
+        adminTelegramId: row.admin_telegram_id,
+        action: row.action,
+        reason: row.reason,
+        details: row.details,
+        createdAt: row.created_at,
+        targetUsername: row.target_username,
+        targetTaskTitle: row.target_task_title
+      }));
+    }
+    default:
+      throw new ApiError("bad_request", "Unknown admin action.", 400);
+  }
+}
+
+// supabase/functions/_shared/db.ts
+function getServiceClient() {
+  const url = Deno.env.get("SUPABASE_URL");
+  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) {
+    throw new Error("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not set");
+  }
+  return createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false }
+  });
+}
+
+// supabase/functions/_shared/session.ts
+var BASE_CHECKIN = 10;
+var BONUS_PER_DAY = 2;
+var BONUS_CAP = 10;
+var REFERRER_BONUS = 50;
+var REFERRED_BONUS = 25;
+function isoDate(date) {
+  return date.toISOString().slice(0, 10);
+}
+function bonusForStreak(streak) {
+  return Math.min(Math.max(streak - 1, 0) * BONUS_PER_DAY, BONUS_CAP);
+}
+async function buildSession(db, ctx) {
+  const now = /* @__PURE__ */ new Date();
+  const today = isoDate(now);
+  const yesterday = isoDate(new Date(now.getTime() - 864e5));
+  const doneToday = ctx.user.last_checkin === today;
+  const currentStreak = doneToday ? ctx.user.streak : ctx.user.last_checkin === yesterday ? ctx.user.streak : 0;
+  const projectedStreak = doneToday ? ctx.user.streak + 1 : currentStreak + 1;
+  const bonus = bonusForStreak(projectedStreak);
+  const reward = BASE_CHECKIN + bonus;
+  const [
+    tasksResult,
+    completedResult,
+    referralCountResult,
+    earningsResult,
+    recentReferralsResult,
+    rankResult,
+    totalResult
+  ] = await Promise.all([
+    db.from("tasks").select("id,title,type,reward,active,expires_at,created_at").order("created_at"),
+    db.from("user_tasks").select("task_id").eq("user_id", ctx.user.id),
+    db.from("referrals").select("id", { count: "exact", head: true }).eq("referrer_id", ctx.user.id),
+    db.from("referrals").select("referrer_bonus").eq("referrer_id", ctx.user.id).eq("bonus_paid", true),
+    db.from("referrals").select("created_at,referred_id").eq("referrer_id", ctx.user.id).order("created_at", { ascending: false }).limit(5),
+    db.rpc("get_leaderboard", { p_user_id: ctx.user.id, p_limit: 100 }),
+    db.from("users").select("id", { count: "exact", head: true }).eq("banned", false)
+  ]);
+  const earned = (earningsResult.data ?? []).reduce(
+    (sum, row) => sum + Number(row.referrer_bonus ?? 0),
+    0
+  );
+  const completedIds = new Set((completedResult.data ?? []).map((row) => row.task_id));
+  const availableTasks = (tasksResult.data ?? []).filter((task) => {
+    if (completedIds.has(task.id)) return false;
+    if (!task.active) return false;
+    if (task.expires_at && new Date(task.expires_at).getTime() <= now.getTime()) {
+      return false;
+    }
+    return true;
+  });
+  const allReferrals = recentReferralsResult.data ?? [];
+  const invited = referralCountResult.count ?? 0;
+  let recent = [];
+  if (allReferrals.length > 0) {
+    const ids = allReferrals.map((row) => row.referred_id);
+    const { data: people } = await db.from("users").select("id,first_name,username").in("id", ids);
+    const byId = new Map((people ?? []).map((person) => [person.id, person]));
+    recent = allReferrals.map((row) => {
+      const person = byId.get(row.referred_id);
+      return {
+        firstName: person?.first_name ?? null,
+        username: person?.username ?? null,
+        joinedAt: row.created_at
+      };
+    });
+  }
+  const meOnBoard = (rankResult.data ?? []).find(
+    (row) => row.is_me === true
+  );
+  const botUsername = Deno.env.get("BOT_USERNAME") ?? "";
+  const code = String(ctx.user.telegram_id);
+  return {
+    user: {
+      id: ctx.user.id,
+      telegramId: Number(ctx.user.telegram_id),
+      username: ctx.user.username,
+      firstName: ctx.user.first_name,
+      points: ctx.user.points,
+      streak: currentStreak,
+      lastCheckin: ctx.user.last_checkin,
+      isAdmin: ctx.isAdmin
+    },
+    checkin: {
+      available: !doneToday,
+      doneToday,
+      streak: currentStreak,
+      projectedStreak,
+      base: BASE_CHECKIN,
+      bonus,
+      reward
+    },
+    counts: {
+      tasksAvailable: availableTasks.length,
+      tasksCompleted: completedIds.size,
+      referrals: invited,
+      referralEarnings: earned
+    },
+    rank: {
+      // Same ordering as the leaderboard, so the two screens can't disagree.
+      position: meOnBoard ? Number(meOnBoard.place) : null,
+      total: totalResult.count ?? 0
+    },
+    referral: {
+      code,
+      link: botUsername ? `https://t.me/${botUsername}?startapp=ref_${code}` : "",
+      referrerBonus: REFERRER_BONUS,
+      referredBonus: REFERRED_BONUS,
+      invited,
+      earned,
+      recent
+    },
+    nextTasks: availableTasks.slice(0, 2).map((task) => ({
+      id: task.id,
+      title: task.title,
+      reward: Number(task.reward),
+      type: task.type
+    })),
+    welcomeBonus: ctx.referralBonus
+  };
+}
+async function claimCheckin(db, userId) {
+  const { data, error } = await db.rpc("claim_daily_checkin", { p_user_id: userId });
+  if (error) throw fromDbError(error);
+  const row = Array.isArray(data) ? data[0] : null;
+  if (!row) throw fromDbError("user_not_found");
+  return {
+    points: Number(row.new_points),
+    streak: Number(row.new_streak),
+    reward: Number(row.reward),
+    bonus: Number(row.bonus)
+  };
+}
+
+// supabase/functions/_shared/links.ts
+function channelRefFromUrl(rawUrl) {
+  const value = rawUrl.trim();
+  if (value.startsWith("@")) return value;
+  if (/^-?\d{5,}$/.test(value)) return value;
+  try {
+    const url = new URL(value);
+    if (!["t.me", "telegram.me", "telegram.dog"].includes(url.hostname)) return null;
+    const segment = url.pathname.split("/").filter(Boolean)[0];
+    if (!segment || segment.startsWith("+") || segment.toLowerCase() === "joinchat") {
+      return null;
+    }
+    return `@${segment}`;
+  } catch {
+    return null;
+  }
+}
+
+// supabase/functions/_shared/tasks.ts
+async function listTasks(db, userId) {
+  const [tasksResult, completedResult, startsResult] = await Promise.all([
+    db.from("tasks").select("*").order("created_at", { ascending: true }),
+    db.from("user_tasks").select("task_id,completed_at").eq("user_id", userId),
+    db.from("user_task_starts").select("task_id,started_at").eq("user_id", userId)
+  ]);
+  if (tasksResult.error) throw fromDbError(tasksResult.error);
+  const completed = new Map(
+    (completedResult.data ?? []).map((row) => [row.task_id, row.completed_at])
+  );
+  const starts = new Map(
+    (startsResult.data ?? []).map((row) => [row.task_id, row.started_at])
+  );
+  const now = Date.now();
+  const views = [];
+  for (const task of tasksResult.data ?? []) {
+    const completedAt = completed.get(task.id);
+    const startedAt = starts.get(task.id);
+    const expired = task.expires_at ? new Date(task.expires_at).getTime() <= now : false;
+    if (!completedAt) {
+      if (!task.active || expired) continue;
+    }
+    const timerSeconds = task.type === "join_channel" ? 0 : task.timer_seconds;
+    const view = {
+      id: task.id,
+      title: task.title,
+      type: task.type,
+      reward: task.reward,
+      url: task.url,
+      timerSeconds,
+      expiresAt: task.expires_at,
+      status: completedAt ? "completed" : startedAt ? "started" : "available"
+    };
+    if (startedAt) {
+      view.startedAt = startedAt;
+      view.claimAt = new Date(new Date(startedAt).getTime() + timerSeconds * 1e3).toISOString();
+    }
+    if (completedAt) view.completedAt = completedAt;
+    views.push(view);
+  }
+  return views.sort((a, b) => {
+    const rank = { available: 0, started: 1, completed: 2 };
+    if (rank[a.status] !== rank[b.status]) return rank[a.status] - rank[b.status];
+    return 0;
+  });
+}
+async function startTask(db, userId, taskId) {
+  const { data, error } = await db.rpc("start_task", {
+    p_user_id: userId,
+    p_task_id: taskId
+  });
+  if (error) throw fromDbError(error);
+  const row = Array.isArray(data) ? data[0] : null;
+  if (!row) throw fromDbError("task_unavailable");
+  return {
+    startedAt: row.started_at,
+    timerSeconds: Number(row.timer_seconds),
+    claimAt: row.claim_at
+  };
+}
+async function isChannelMember(botToken, taskUrl, telegramId) {
+  const chatId = channelRefFromUrl(taskUrl);
+  if (!chatId) {
+    throw new ApiError(
+      "verification_failed",
+      "This channel link can't be checked. Ask the admin to use a public @channel link.",
+      400
+    );
+  }
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/getChatMember`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, user_id: telegramId })
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body?.ok) {
+    console.error("getChatMember failed:", body?.description ?? response.status);
+    throw new ApiError(
+      "verification_failed",
+      "We can't check that channel right now. The bot may need to be added to it.",
+      400
+    );
+  }
+  const status = body.result?.status;
+  return status === "creator" || status === "administrator" || status === "member" || status === "restricted" && body.result?.is_member === true;
+}
+async function claimTask(db, user, taskId, botToken) {
+  const { data: task, error } = await db.from("tasks").select("id,type,url,active,expires_at").eq("id", taskId).maybeSingle();
+  if (error) throw fromDbError(error);
+  if (!task) throw fromDbError("task_unavailable");
+  let verified = false;
+  if (task.type === "join_channel") {
+    if (!botToken) {
+      throw new ApiError("server_misconfigured", MESSAGES.server_misconfigured, 500);
+    }
+    verified = await isChannelMember(botToken, task.url, Number(user.telegram_id));
+    if (!verified) {
+      throw new ApiError("membership_not_found", MESSAGES.membership_not_found, 403);
+    }
+  }
+  const { data, error: claimError } = await db.rpc("complete_task", {
+    p_user_id: user.id,
+    p_task_id: taskId,
+    p_verified: verified
+  });
+  if (claimError) throw fromDbError(claimError);
+  const row = Array.isArray(data) ? data[0] : null;
+  if (!row) throw fromDbError("internal_error");
+  return { points: Number(row.new_points), reward: Number(row.reward) };
+}
+
+// supabase/functions/api/index.ts
+function payloadOf(body) {
+  return typeof body.payload === "object" && body.payload !== null ? body.payload : {};
+}
+function requireTaskId(payload) {
+  if (!isUuid(payload.taskId)) {
+    throw new ApiError("task_unavailable", MESSAGES.task_unavailable, 400);
+  }
+  return payload.taskId;
+}
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return preflight(req);
+  try {
+    if (req.method !== "POST") {
+      throw new ApiError("bad_request", MESSAGES.bad_request, 405);
+    }
+    const body = await req.json().catch(() => null);
+    if (!body || typeof body !== "object") {
+      throw new ApiError("bad_request", MESSAGES.bad_request, 400);
+    }
+    const action = typeof body.action === "string" ? body.action : "";
+    if (!action) throw new ApiError("bad_request", MESSAGES.bad_request, 400);
+    const db = getServiceClient();
+    const ctx = await authenticate(req, db, body.initData);
+    const payload = payloadOf(body);
+    const isAdminAction = action.startsWith("admin.");
+    await enforceRateLimit(db, ctx.user.id, "api", 180, 60);
+    switch (action) {
+      case "session": {
+        await enforceRateLimit(db, ctx.user.id, "session", 90, 60);
+        return json(req, { data: await buildSession(db, ctx) });
+      }
+      case "checkin": {
+        await enforceRateLimit(db, ctx.user.id, "checkin", 10, 3600);
+        const result = await claimCheckin(db, ctx.user.id);
+        return json(req, { data: result });
+      }
+      case "tasks.list": {
+        await enforceRateLimit(db, ctx.user.id, "tasks.list", 90, 60);
+        return json(req, { data: await listTasks(db, ctx.user.id) });
+      }
+      case "tasks.start": {
+        await enforceRateLimit(db, ctx.user.id, "tasks.start", 30, 60);
+        const taskId = requireTaskId(payload);
+        return json(req, { data: await startTask(db, ctx.user.id, taskId) });
+      }
+      case "tasks.claim": {
+        await enforceRateLimit(db, ctx.user.id, "tasks.claim", 30, 60);
+        const taskId = requireTaskId(payload);
+        const result = await claimTask(
+          db,
+          ctx.user,
+          taskId,
+          Deno.env.get("BOT_TOKEN") ?? ""
+        );
+        return json(req, { data: result });
+      }
+      case "referrals": {
+        await enforceRateLimit(db, ctx.user.id, "referrals", 60, 60);
+        const session = await buildSession(db, ctx);
+        return json(req, {
+          data: {
+            referral: session.referral,
+            counts: session.counts
+          }
+        });
+      }
+      case "leaderboard": {
+        await enforceRateLimit(db, ctx.user.id, "leaderboard", 60, 60);
+        const [board, total] = await Promise.all([
+          db.rpc("get_leaderboard", { p_user_id: ctx.user.id, p_limit: 100 }),
+          db.from("users").select("id", { count: "exact", head: true }).eq("banned", false)
+        ]);
+        if (board.error) throw fromDbError(board.error);
+        const rows = (board.data ?? []).map((row) => ({
+          position: Number(row.place),
+          telegramId: row.telegram_id,
+          username: row.username,
+          firstName: row.first_name,
+          points: row.points,
+          isMe: row.is_me === true
+        }));
+        return json(req, {
+          data: {
+            top: rows.filter((row) => row.position <= 100),
+            me: rows.find((row) => row.isMe) ?? null,
+            total: total.count ?? 0
+          }
+        });
+      }
+      default: {
+        if (isAdminAction) {
+          return json(req, {
+            data: await handleAdmin(db, ctx, action, payload)
+          });
+        }
+        throw new ApiError("bad_request", "Unknown action.", 404);
+      }
+    }
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return json(
+        req,
+        { error: { code: error.code, message: error.message } },
+        error.status
+      );
+    }
+    console.error("Unhandled API error:", error);
+    return json(
+      req,
+      { error: { code: "internal_error", message: MESSAGES.internal_error } },
+      500
+    );
+  }
+});
