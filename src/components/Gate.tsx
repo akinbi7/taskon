@@ -67,6 +67,8 @@ export function Gate({
         <br />
         auth_date {Number.isFinite(authDate) ? authDate : "none"} · now {nowSeconds} · Δ{" "}
         {skew === null ? "n/a" : `${skew}s`}
+        <br />
+        fields: {initDataParams ? [...initDataParams.keys()].join(",") || "none" : "parse_failed"}
       </p>
     </div>
   );
