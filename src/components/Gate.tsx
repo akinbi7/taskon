@@ -1,5 +1,6 @@
 import { Wordmark } from "../components/Icons";
 import { errorMessage, errorCode } from "../lib/errors";
+import { getInitData } from "../lib/telegram";
 
 export function LoadingScreen({ label = "Counting the points…" }: { label?: string }) {
   return (
@@ -23,6 +24,8 @@ export function Gate({
   const bot = import.meta.env.VITE_BOT_USERNAME;
   const code = errorCode(error);
   const isAuth = ["missing_init_data", "invalid_init_data", "init_data_expired"].includes(code);
+  // Temporary diagnostic: shows which check rejected the session.
+  const initDataLength = getInitData().length;
 
   return (
     <div className="gate">
@@ -47,6 +50,9 @@ export function Gate({
         </a>
       ) : null}
       <p className="gate__fine">Points only. Nothing here is money.</p>
+      <p className="gate__diag">
+        {code || "no_code"} · initData {initDataLength ? `${initDataLength} chars` : "empty"}
+      </p>
     </div>
   );
 }
